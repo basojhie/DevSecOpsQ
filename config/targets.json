@@ -1,0 +1,5 @@
+{
+  "targets": [],
+  "schema_version": 1,
+  "_comment": "Add explicit approved assets. Each item: {"domain":"example.com","environment":"staging|production","authorization_ref":"ticket-or-approval-reference","active_testing_approved":false}. Never use an asset without written authorization."
+}
