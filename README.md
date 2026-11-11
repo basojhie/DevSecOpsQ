@@ -4,45 +4,31 @@ DevSecOpsQ is a scope-gated, low-impact ASM and defensive security assessment pi
 
 ## Safety model
 
-- Every target must be listed in `config/scope.txt` and pass the validator.
-- Default profile is `passive`. Active checks are opt-in and restricted to explicitly approved staging targets.
-- The workflow never accepts arbitrary target input from an untrusted dispatch payload.
+- Every target must be listed in `config/scope.txt` and have an exact matching record in `config/targets.json`.
+- Default profile is `passive`. The target registry must not be empty: an empty registry fails closed.
+- Staging assessment requires every target to be tagged staging with `active_testing_approved: true` and an authorization reference.
+- Discovered subdomains are filtered back to the approved root domain before any follow-on network tool receives them. Redirects and third-party/CDN assets are not implicitly authorized.
 - No exploit, brute-force, credential testing, destructive checks, or production load testing is included.
-- Production is limited to passive discovery and low-impact HTTP/TLS metadata checks. Active DAST/path discovery/performance testing require staging approval.
+- Automated active DAST, Nuclei, Dalfox, ffuf and k6 are deliberately not wired as unattended steps; they require separately reviewed test inputs and approval.
 - Keep credentials in GitHub Actions Secrets. Never commit tokens, cookies, or account data.
-- Cancel the workflow immediately if the asset owner requests a stop or service health degrades.
 
 ## Quick start
 
-1. Edit `config/scope.txt` with one exact domain per line. Do not add third-party/CDN/shared-hosting assets unless their owner explicitly authorized the test.
-2. Edit `config/targets.json` to map each domain to `production` or `staging` and record approval metadata.
-3. Review `.github/workflows/asm.yml`, tool pins, rate limits and exclusions.
-4. Run **Actions → DevSecOpsQ ASM → Run workflow** with the `passive` profile first.
-5. Review the generated artifact before enabling optional staging-only checks.
+1. Add one exact domain per line to `config/scope.txt`.
+2. Add matching target objects to `config/targets.json`, including environment and a written-approval reference.
+3. Run **Actions → DevSecOpsQ ASM → Run workflow** with `passive` first.
+4. Staging assessments require explicit approval in the registry and should run only in a controlled maintenance window.
 
 ## Pipeline
 
-Scope gate → passive subdomain discovery (Subfinder) → DNS validation (dnsx) → HTTP metadata (httpx) → asset delta (anew) → optional constrained port/service inventory (Naabu/Nmap) → historical URL candidates (gau) → constrained crawl (Katana) → optional staging-only content discovery (ffuf) → TLS review (testssl.sh) → curated Nuclei templates → code/dependency/secret scanning (Semgrep, Gitleaks, Trivy) → JSONL/summary report → optional Telegram notification.
+Scope gate → passive subdomain discovery (Subfinder) → exact-root filtering → DNS validation (dnsx) → HTTP metadata (httpx) → asset delta (anew) → historical URL candidates (gau) → optional staging-only constrained port/service inventory (Naabu/Nmap) and crawl (Katana) → sanitized reports.
 
-Tool availability varies by runner and upstream release. Pin versions in the workflow and review release notes before upgrades.
+Repository security is handled separately by GitHub Actions using Semgrep, Gitleaks and Trivy. The operational matrix and Termux controller are documented under `docs/`.
 
-## Termux controller
+## Limitations and next steps
 
-See [docs/TERMUX.md](docs/TERMUX.md). Termux is a remote trigger/status client; scans run on isolated GitHub-hosted runners.
+Cloudflare R2 baseline persistence, Telegram alerts, OWASP ZAP baseline, curated Nuclei templates, TLS assessment, and manual WSTG/API checklist tracking are documented extension points; they are not represented as deployed until credentials, pinned versions, safe templates and integration tests are configured. Review reports privately and manually validate findings.
 
-## Configuration
-
-- `config/scope.txt`: exact approved apex domains/hostnames.
-- `config/targets.json`: environment and authorization metadata.
-- `config/exclude.txt`: explicitly excluded hostnames/IP ranges.
-- `config/profiles.json`: documented rate and feature profiles.
-- `scripts/validate_scope.py`: fail-closed scope validation.
-- `scripts/summarize.py`: sanitized artifact summary.
-
-## Outputs
-
-Workflow artifacts contain discovery inventories and scanner reports. They may still reveal internal asset information; restrict repository and artifact access and set a short retention period.
-
-## Disclaimer
+The initial baseline file is runner-local, so delta history currently resets between clean GitHub-hosted runs. Configure a protected persistent backend (for example Cloudflare R2 with least-privilege credentials and retention policy) before treating cross-run change detection as operational.
 
 Use only against systems you own or have written permission to assess. Automated findings require manual validation; absence of findings is not proof of security.

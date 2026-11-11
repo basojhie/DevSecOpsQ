@@ -1,0 +1,16 @@
+{
+  "passive": {
+    "description": "Default low-impact discovery and metadata only",
+    "subfinder": true, "dnsx": true, "httpx": true, "anew": true, "gau": true,
+    "katana": false, "naabu": false, "nmap": false, "nuclei": false,
+    "ffuf": false, "testssl": false, "zap": false, "dalfox": false, "k6": false,
+    "max_requests_per_second": 2
+  },
+  "staging_assessment": {
+    "description": "Optional explicitly approved staging-only checks",
+    "requires_staging": true, "requires_active_testing_approval": true,
+    "katana": true, "naabu": true, "nmap": true, "nuclei": true,
+    "ffuf": true, "testssl": true,
+    "max_requests_per_second": 2
+  }
+}

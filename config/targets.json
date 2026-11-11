@@ -1,0 +1,5 @@
+{
+  "targets": [],
+  "schema_version": 1,
+  "_comment": "Keep empty until explicitly authorized targets are entered. Example: {\"domain\":\"example.com\",\"environment\":\"staging\",\"authorization_ref\":\"approval-ticket\",\"active_testing_approved\":false}"
+}

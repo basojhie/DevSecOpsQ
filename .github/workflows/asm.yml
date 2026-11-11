@@ -1,0 +1,151 @@
+name: DevSecOpsQ ASM
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "passive default; staging assessment requires explicit approval in target registry"
+        required: true
+        type: choice
+        options: [passive, staging_assessment]
+        default: passive
+  schedule:
+    - cron: "17 2 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecopsq-asm
+  cancel-in-progress: false
+
+jobs:
+  scope-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      profile: ${{ steps.profile.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: profile
+        shell: bash
+        env:
+          REQUESTED_PROFILE: ${{ inputs.profile }}
+        run: |
+          value="$REQUESTED_PROFILE"
+          if [[ -z "$value" ]]; then value="passive"; fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate explicit authorization and exact target scope
+        run: python scripts/validate_scope.py "${{ steps.profile.outputs.value }}"
+      - name: Upload approved scope
+        uses: actions/upload-artifact@v4
+        with:
+          name: approved-scope
+          path: approved-targets.txt
+          retention-days: 1
+
+  scan:
+    needs: scope-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      ASM_PROFILE: ${{ needs.scope-gate.outputs.profile }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: approved-scope
+      - name: Install pinned utilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq nmap
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.6.7
+          go install github.com/projectdiscovery/dnsx/cmd/dnsx@v1.2.1
+          go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.10
+          go install github.com/tomnomnom/anew@v0.1.1
+          go install github.com/lc/gau/v2/cmd/gau@v2.2.4
+          go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.3.4
+          go install github.com/projectdiscovery/katana/cmd/katana@v1.1.2
+          go install github.com/ffuf/ffuf/v2@v2.1.0
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Prepare report directories
+        run: mkdir -p reports state
+      - name: Passive discovery and strict host filtering
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t targets < approved-targets.txt
+          : > reports/subdomains.raw
+          : > reports/in-scope-hosts.txt
+          for target in "${targets[@]}"; do
+            subfinder -silent -d "$target" -o reports/subfinder-"$target".txt || true
+            printf '%s\n' "$target" >> reports/subdomains.raw
+            if [[ -s reports/subfinder-"$target".txt ]]; then
+              cat reports/subfinder-"$target".txt >> reports/subdomains.raw
+            fi
+          done
+          sort -u reports/subdomains.raw -o reports/subdomains.raw
+          while IFS= read -r host; do
+            for root in "${targets[@]}"; do
+              if [[ "$host" == "$root" || "$host" == *."$root" ]]; then
+                if ! grep -Fxq "$host" config/exclude.txt; then
+                  printf '%s\n' "$host" >> reports/in-scope-hosts.txt
+                fi
+                break
+              fi
+            done
+          done < reports/subdomains.raw
+          sort -u reports/in-scope-hosts.txt -o reports/in-scope-hosts.txt
+          if [[ -s reports/in-scope-hosts.txt ]]; then
+            dnsx -l reports/in-scope-hosts.txt -silent -a -aaaa -cname -json -o reports/dns.jsonl
+            httpx -l reports/in-scope-hosts.txt -silent -rate-limit 2 -json -o reports/httpx.jsonl
+            cat reports/in-scope-hosts.txt | anew state/subdomains.txt > reports/subdomains-new.txt
+          else
+            : > reports/dns.jsonl; : > reports/httpx.jsonl; : > reports/subdomains-new.txt
+          fi
+      - name: Historical URL candidates (passive)
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > reports/gau-candidates.txt
+          while IFS= read -r target; do
+            gau --subs "$target" >> reports/gau-candidates.txt || true
+          done < approved-targets.txt
+          sort -u reports/gau-candidates.txt -o reports/gau-candidates.txt
+      - name: Optional staging-only low-impact network inventory
+        if: env.ASM_PROFILE == 'staging_assessment'
+        shell: bash
+        run: |
+          set -euo pipefail
+          naabu -list reports/in-scope-hosts.txt -top-ports 100 -rate 10 -exclude-cdn -silent -o reports/naabu.txt
+          if [[ -s reports/naabu.txt ]]; then
+            # Convert validated host:port observations into per-host selected ports.
+            awk -F: '{print $1}' reports/naabu.txt | sort -u > reports/naabu-hosts.txt
+            # Restrict Nmap to the ports discovered by Naabu.
+            awk -F: '{print $2}' reports/naabu.txt | sort -nu | paste -sd, - > reports/naabu-ports.csv
+            if [[ -s reports/naabu-ports.csv ]]; then
+              nmap -sT -sV --version-light -T2 --host-timeout 30s -p "$(cat reports/naabu-ports.csv)" -iL reports/naabu-hosts.txt -oN reports/nmap.txt
+            fi
+          fi
+          httpx -l reports/in-scope-hosts.txt -silent -rate-limit 2 -json -o reports/httpx-staging.jsonl
+          katana -list reports/in-scope-hosts.txt -d 2 -c 2 -rl 2 -silent -o reports/katana.txt
+          # ffuf, Nuclei active templates, ZAP active scan and Dalfox are deliberately
+          # not run automatically. They require per-test reviewed inputs and separate approval.
+      - name: Generate sanitized summary
+        run: python scripts/summarize.py
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devsecopsq-asm-${{ github.run_number }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
