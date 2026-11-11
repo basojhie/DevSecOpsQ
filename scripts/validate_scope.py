@@ -34,8 +34,11 @@ def main() -> int:
     except Exception as exc:
         print(f"SCOPE_GATE=FAIL config_error={type(exc).__name__}")
         return 2
-    entries = data.get("targets", [])
-    if not isinstance(entries, list) or not scope:
+    if not isinstance(data, dict) or not isinstance(data.get("targets"), list):
+        print("SCOPE_GATE=FAIL reason=invalid_target_registry")
+        return 2
+    entries = data["targets"]
+    if not scope or not entries:
         print("SCOPE_GATE=FAIL reason=empty_or_invalid_scope")
         return 2
     if len(scope) != len(set(scope)) or any(not valid_domain(x) for x in scope):
@@ -56,17 +59,16 @@ def main() -> int:
         if not str(item.get("authorization_ref", "")).strip():
             print("SCOPE_GATE=FAIL reason=authorization_reference_required")
             return 2
+        if not isinstance(item.get("active_testing_approved", False), bool):
+            print("SCOPE_GATE=FAIL reason=invalid_active_approval")
+            return 2
         approved[domain] = item
     if set(scope) != set(approved):
         print("SCOPE_GATE=FAIL reason=scope_targets_mismatch")
         return 2
-    for domain, item in approved.items():
+    for domain in approved:
         if domain in excludes:
             print("SCOPE_GATE=FAIL reason=target_excluded")
-            return 2
-        # Wildcard/subdomain expansion is intentionally not implicit.
-        if item.get("active_testing_approved", False) not in (True, False):
-            print("SCOPE_GATE=FAIL reason=invalid_active_approval")
             return 2
     profile = sys.argv[1] if len(sys.argv) > 1 else "passive"
     if profile not in ("passive", "staging_assessment"):
