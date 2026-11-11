@@ -1,0 +1,1 @@
+# One exact approved domain/hostname per line. Keep empty until you add assets you own or are authorized to test.
