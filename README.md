@@ -29,4 +29,6 @@ Repository security is handled separately by GitHub Actions using Semgrep, Gitle
 
 Cloudflare R2 baseline persistence, Telegram alerts, OWASP ZAP baseline, curated Nuclei templates, TLS assessment, and manual WSTG/API checklist tracking are documented extension points; they are not represented as deployed until credentials, pinned versions, safe templates and integration tests are configured. Review reports privately and manually validate findings.
 
+The initial baseline file is runner-local, so delta history currently resets between clean GitHub-hosted runs. Configure a protected persistent backend (for example Cloudflare R2 with least-privilege credentials and retention policy) before treating cross-run change detection as operational.
+
 Use only against systems you own or have written permission to assess. Automated findings require manual validation; absence of findings is not proof of security.
