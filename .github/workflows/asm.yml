@@ -1,0 +1,117 @@
+name: DevSecOpsQ ASM
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Run profile (passive is default; staging requires documented approval)"
+        required: true
+        type: choice
+        options: [passive, staging_assessment]
+        default: passive
+  schedule:
+    - cron: "17 2 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecopsq-asm
+  cancel-in-progress: false
+
+jobs:
+  scope-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      profile: ${{ steps.profile.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: profile
+        shell: bash
+        run: |
+          value="${{ inputs.profile }}"
+          if [[ -z "$value" ]]; then value="passive"; fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate explicit authorization and scope
+        run: python scripts/validate_scope.py "${{ steps.profile.outputs.value }}"
+      - name: Upload approved scope
+        uses: actions/upload-artifact@v4
+        with:
+          name: approved-scope
+          path: approved-targets.txt
+          retention-days: 1
+
+  scan:
+    needs: scope-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      ASM_PROFILE: ${{ needs.scope-gate.outputs.profile }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: approved-scope
+      - name: Install pinned utilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq nmap
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.6.7
+          go install github.com/projectdiscovery/dnsx/cmd/dnsx@v1.2.1
+          go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.10
+          go install github.com/tomnomnom/anew@v0.1.1
+          go install github.com/lc/gau/v2/cmd/gau@v2.2.4
+          go install github.com/projectdiscovery/naabu/v2/cmd/naabu@v2.3.4
+          go install github.com/projectdiscovery/katana/cmd/katana@v1.1.2
+          go install github.com/ffuf/ffuf/v2@v2.1.0
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Prepare report directories
+        run: mkdir -p reports state
+      - name: Passive discovery and HTTP metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t targets < approved-targets.txt
+          printf '%s\n' "${targets[@]}" | subfinder -silent -dL /dev/stdin -all -o reports/subdomains.raw || true
+          if [[ -s reports/subdomains.raw ]]; then
+            cat reports/subdomains.raw | sort -u | dnsx -silent -a -aaaa -cname -json -o reports/dns.jsonl
+            awk -F'[" ]+' '{print $1}' reports/subdomains.raw | sort -u | httpx -silent -rate-limit 2 -json -o reports/httpx.jsonl
+            cat reports/subdomains.raw | sort -u | anew state/subdomains.txt > reports/subdomains-new.txt
+          else
+            : > reports/dns.jsonl; : > reports/httpx.jsonl; : > reports/subdomains-new.txt
+          fi
+      - name: Optional staging-only network inventory
+        if: env.ASM_PROFILE == 'staging_assessment'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The same validated target list is used; only a narrow common-port set is checked.
+          naabu -list approved-targets.txt -top-ports 100 -rate 20 -silent -o reports/naabu.txt
+          if [[ -s reports/naabu.txt ]]; then
+            nmap -sT -sV --version-light -T2 --host-timeout 30s -iL approved-targets.txt -oN reports/nmap.txt || true
+          fi
+          katana -list approved-targets.txt -d 2 -c 2 -rl 2 -silent -o reports/katana.txt
+          if command -v ffuf >/dev/null 2>&1; then
+            echo "ffuf installed; execution intentionally disabled until per-target wordlist and approval are reviewed."
+          fi
+      - name: Generate sanitized summary
+        run: python scripts/summarize.py
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devsecopsq-asm-${{ github.run_number }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
