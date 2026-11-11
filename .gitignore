@@ -1,0 +1,9 @@
+.env
+*.pem
+*.key
+*.token
+*.cookie
+reports/
+artifacts/
+state/
+approved-targets.txt
