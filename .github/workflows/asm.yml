@@ -127,11 +127,16 @@ jobs:
           set -euo pipefail
           naabu -list reports/in-scope-hosts.txt -top-ports 100 -rate 10 -exclude-cdn -silent -o reports/naabu.txt
           if [[ -s reports/naabu.txt ]]; then
-            # Nmap receives only hostnames emitted by the scoped Naabu result.
-            cut -d: -f1 reports/naabu.txt | sort -u > reports/naabu-hosts.txt
-            nmap -sT -sV --version-light -T2 --host-timeout 30s -iL reports/naabu-hosts.txt -oN reports/nmap.txt
+            # Convert validated host:port observations into per-host selected ports.
+            awk -F: '{print $1}' reports/naabu.txt | sort -u > reports/naabu-hosts.txt
+            # Restrict Nmap to the ports discovered by Naabu.
+            awk -F: '{print $2}' reports/naabu.txt | sort -nu | paste -sd, - > reports/naabu-ports.csv
+            if [[ -s reports/naabu-ports.csv ]]; then
+              nmap -sT -sV --version-light -T2 --host-timeout 30s -p "$(cat reports/naabu-ports.csv)" -iL reports/naabu-hosts.txt -oN reports/nmap.txt
+            fi
           fi
-          katana -list reports/httpx.jsonl -d 2 -c 2 -rl 2 -silent -o reports/katana.txt
+          httpx -l reports/in-scope-hosts.txt -silent -rate-limit 2 -json -o reports/httpx-staging.jsonl
+          katana -list reports/in-scope-hosts.txt -d 2 -c 2 -rl 2 -silent -o reports/katana.txt
           # ffuf, Nuclei active templates, ZAP active scan and Dalfox are deliberately
           # not run automatically. They require per-test reviewed inputs and separate approval.
       - name: Generate sanitized summary
