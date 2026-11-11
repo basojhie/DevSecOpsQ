@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: "Run profile (passive is default; staging requires documented approval)"
+        description: "passive default; staging assessment requires explicit approval in target registry"
         required: true
         type: choice
         options: [passive, staging_assessment]
@@ -29,14 +29,16 @@ jobs:
       - uses: actions/checkout@v4
       - id: profile
         shell: bash
+        env:
+          REQUESTED_PROFILE: ${{ inputs.profile }}
         run: |
-          value="${{ inputs.profile }}"
+          value="$REQUESTED_PROFILE"
           if [[ -z "$value" ]]; then value="passive"; fi
           echo "value=$value" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Validate explicit authorization and scope
+      - name: Validate explicit authorization and exact target scope
         run: python scripts/validate_scope.py "${{ steps.profile.outputs.value }}"
       - name: Upload approved scope
         uses: actions/upload-artifact@v4
@@ -49,8 +51,6 @@ jobs:
     needs: scope-gate
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    permissions:
-      contents: read
     env:
       ASM_PROFILE: ${{ needs.scope-gate.outputs.profile }}
     steps:
@@ -78,33 +78,62 @@ jobs:
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
       - name: Prepare report directories
         run: mkdir -p reports state
-      - name: Passive discovery and HTTP metadata
+      - name: Passive discovery and strict host filtering
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t targets < approved-targets.txt
-          printf '%s\n' "${targets[@]}" | subfinder -silent -dL /dev/stdin -all -o reports/subdomains.raw || true
-          if [[ -s reports/subdomains.raw ]]; then
-            cat reports/subdomains.raw | sort -u | dnsx -silent -a -aaaa -cname -json -o reports/dns.jsonl
-            awk -F'[" ]+' '{print $1}' reports/subdomains.raw | sort -u | httpx -silent -rate-limit 2 -json -o reports/httpx.jsonl
-            cat reports/subdomains.raw | sort -u | anew state/subdomains.txt > reports/subdomains-new.txt
+          : > reports/subdomains.raw
+          : > reports/in-scope-hosts.txt
+          for target in "${targets[@]}"; do
+            subfinder -silent -d "$target" -o reports/subfinder-"$target".txt || true
+            printf '%s\n' "$target" >> reports/subdomains.raw
+            if [[ -s reports/subfinder-"$target".txt ]]; then
+              cat reports/subfinder-"$target".txt >> reports/subdomains.raw
+            fi
+          done
+          sort -u reports/subdomains.raw -o reports/subdomains.raw
+          while IFS= read -r host; do
+            for root in "${targets[@]}"; do
+              if [[ "$host" == "$root" || "$host" == *."$root" ]]; then
+                if ! grep -Fxq "$host" config/exclude.txt; then
+                  printf '%s\n' "$host" >> reports/in-scope-hosts.txt
+                fi
+                break
+              fi
+            done
+          done < reports/subdomains.raw
+          sort -u reports/in-scope-hosts.txt -o reports/in-scope-hosts.txt
+          if [[ -s reports/in-scope-hosts.txt ]]; then
+            dnsx -l reports/in-scope-hosts.txt -silent -a -aaaa -cname -json -o reports/dns.jsonl
+            httpx -l reports/in-scope-hosts.txt -silent -rate-limit 2 -json -o reports/httpx.jsonl
+            cat reports/in-scope-hosts.txt | anew state/subdomains.txt > reports/subdomains-new.txt
           else
             : > reports/dns.jsonl; : > reports/httpx.jsonl; : > reports/subdomains-new.txt
           fi
-      - name: Optional staging-only network inventory
+      - name: Historical URL candidates (passive)
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > reports/gau-candidates.txt
+          while IFS= read -r target; do
+            gau --subs "$target" >> reports/gau-candidates.txt || true
+          done < approved-targets.txt
+          sort -u reports/gau-candidates.txt -o reports/gau-candidates.txt
+      - name: Optional staging-only low-impact network inventory
         if: env.ASM_PROFILE == 'staging_assessment'
         shell: bash
         run: |
           set -euo pipefail
-          # The same validated target list is used; only a narrow common-port set is checked.
-          naabu -list approved-targets.txt -top-ports 100 -rate 20 -silent -o reports/naabu.txt
+          naabu -list reports/in-scope-hosts.txt -top-ports 100 -rate 10 -exclude-cdn -silent -o reports/naabu.txt
           if [[ -s reports/naabu.txt ]]; then
-            nmap -sT -sV --version-light -T2 --host-timeout 30s -iL approved-targets.txt -oN reports/nmap.txt || true
+            # Nmap receives only hostnames emitted by the scoped Naabu result.
+            cut -d: -f1 reports/naabu.txt | sort -u > reports/naabu-hosts.txt
+            nmap -sT -sV --version-light -T2 --host-timeout 30s -iL reports/naabu-hosts.txt -oN reports/nmap.txt
           fi
-          katana -list approved-targets.txt -d 2 -c 2 -rl 2 -silent -o reports/katana.txt
-          if command -v ffuf >/dev/null 2>&1; then
-            echo "ffuf installed; execution intentionally disabled until per-target wordlist and approval are reviewed."
-          fi
+          katana -list reports/httpx.jsonl -d 2 -c 2 -rl 2 -silent -o reports/katana.txt
+          # ffuf, Nuclei active templates, ZAP active scan and Dalfox are deliberately
+          # not run automatically. They require per-test reviewed inputs and separate approval.
       - name: Generate sanitized summary
         run: python scripts/summarize.py
       - name: Upload scan reports
